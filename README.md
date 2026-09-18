@@ -293,3 +293,4 @@ curl http://127.0.0.1:8080/health
 ## 13. Security & Secret Handling
 - No secrets, tokens, API keys, `.env` files, or passwords are committed to the repository or baked into Docker layers.
 - Production error handlers catch unhandled exceptions and emit a sanitized `{"error": "internal error"}` payload without exposing stack traces or environment variables.
+# Project-BUP
