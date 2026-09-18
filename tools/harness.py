@@ -323,9 +323,52 @@ def run_soak_test(post_fn) -> bool:
     print(f"p95_ms={p95:.1f}")
     return p95 <= 5000.0
 
+def run_health_check(base_url: str) -> float:
+    t0 = time.perf_counter()
+    try:
+        r = requests.get(f"{base_url}/health", timeout=5)
+        ms = (time.perf_counter() - t0) * 1000.0
+        if r.status_code == 200 and r.json().get("status") == "ok":
+            return ms
+    except Exception:
+        pass
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    t0 = time.perf_counter()
+    r = client.get("/health")
+    ms = (time.perf_counter() - t0) * 1000.0
+    return ms
+
+def run_all_verification(post_fn, base_url: str) -> bool:
+    print("\n" + "=" * 60)
+    print("STARTING FULL GRIDWISE VERIFICATION GATE")
+    print("=" * 60)
+    
+    health_ms = run_health_check(base_url)
+    ok_pub = run_public_cases(post_fn)
+    ok_para = run_paraphrase_drills(post_fn)
+    ok_adv = run_adversarial_suite(post_fn)
+    ok_soak = run_soak_test(post_fn)
+
+    print("\n" + "=" * 60)
+    print("GRIDWISE VERIFICATION GATE RESULT")
+    print("=" * 60)
+    print(f"health_cold_start_ms={health_ms:.1f}")
+    
+    all_ok = ok_pub and ok_para and ok_adv and ok_soak
+    if all_ok:
+        print("ALL VERIFICATION GATES PASSED (GREEN)")
+    else:
+        print("SOME GATES FAILED (RED)")
+    print("=" * 60)
+    return all_ok
+
 def main():
     parser = argparse.ArgumentParser(description="GridWise Test Harness")
     parser.add_argument("--url", default="http://127.0.0.1:8080", help="Base URL of service")
+    parser.add_argument("--verify", action="store_true", help="Run full end-to-end verification gate")
+    parser.add_argument("--all", action="store_true", help="Run full end-to-end verification gate")
     parser.add_argument("--paraphrase", action="store_true", help="Run paraphrase drill suite")
     parser.add_argument("--adversarial", action="store_true", help="Run adversarial test suite")
     parser.add_argument("--soak", action="store_true", help="Run soak test")
@@ -334,7 +377,10 @@ def main():
     post_fn, client_mode = get_client(args.url)
     print(f"Using {client_mode} against target {args.url}")
 
-    if args.paraphrase:
+    if args.verify or args.all:
+        ok = run_all_verification(post_fn, args.url)
+        sys.exit(0 if ok else 1)
+    elif args.paraphrase:
         ok = run_paraphrase_drills(post_fn)
         sys.exit(0 if ok else 1)
     elif args.adversarial:
