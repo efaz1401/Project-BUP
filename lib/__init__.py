@@ -1,1 +1,1 @@
-"""GridWise core library."""\n
+"""GridWise core library."""

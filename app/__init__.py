@@ -1,1 +1,1 @@
-"""GridWise web service."""\n
+"""GridWise web service."""
