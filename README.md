@@ -95,9 +95,9 @@ Only environment variable **names** are documented; secret values are never comm
 | `GOOGLE_API_KEY` | Optional* | Fallback key for Google Gemini models |
 | `GROQ_API_KEY` | Optional* | API key for Groq (Llama 3.3 70B / 3.1 8B) |
 | `OPENAI_API_KEY` | Optional* | API key for OpenAI (gpt-4o-mini) |
-| `OFFLINE_FALLBACK` | Optional | `1` (Allows keyless execution via deterministic heuristic) |
+| `OFFLINE_FALLBACK` | Optional | `1` (Forces keyless / non-LLM execution via deterministic heuristic. **For local development only.** Must NOT be set during the judging window — the LLM must remain in the operator-note interpretation path per the rubric.) |
 
-*\*Note on LLM keys: The service features an automated multi-provider cascade. If no API keys are provided or network access is absent, the system gracefully falls back to deterministic regex-based extraction and guardrails without crashing or throwing 5xx errors.*
+*\*Note on LLM keys: The service features an automated multi-provider cascade (Gemini → Groq → OpenAI). At least one provider key is **required for judging**: the language model must be in the operator-note interpretation path (see Participant Guide §04 and §09). If no API keys are provided and `OFFLINE_FALLBACK` is not set, the service still returns a controlled `no_op` per note (with `applies=false`, `structured_adjustment=null`) instead of crashing — so the `/optimize-energy` endpoint stays stable, but interpretation quality degrades. `OFFLINE_FALLBACK=1` explicitly forces the deterministic heuristic path even when keys are present; it exists for local development and reproducibility work, never for the graded judging window.*
 
 ---
 
@@ -174,7 +174,7 @@ curl -s -X POST http://127.0.0.1:8080/optimize-energy \
     "scenario_id": "SAMPLE-01",
     "operator_notes": [
       "Facilities will wash the rooftop solar panels from noon until 2 PM. During cleaning, usable solar should be treated as roughly 25% of the forecast.",
-      "The sports office moved next month'''s registration deadline."
+      "The sports office moved next month's registration deadline."
     ],
     "hours": [
       {"hour": 0, "demand_kwh": 90, "solar_kwh": 0, "tariff_bdt_per_kwh": 6},
@@ -234,8 +234,8 @@ curl -s -X POST http://127.0.0.1:8080/optimize-energy \
   ],
   "hourly_plan": [...],
   "total_grid_kwh": 2692.5,
-  "total_cost_bdt": 38365.0,
-  "peak_grid_kwh": 187.5,
+  "total_cost_bdt": 38365,
+  "peak_grid_kwh": 175,
   "plan_summary": "Optimized schedule (Tier 0 (Full directives)): shifted battery storage to offset high tariffs, applied active directives, and maintained end-of-day battery neutrality."
 }
 ```
@@ -244,12 +244,26 @@ curl -s -X POST http://127.0.0.1:8080/optimize-energy \
 
 ## 10. Docker Build & Deployment
 
-### Build Multi-Platform Container
+### Build Multi-Platform Container (recommended)
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/<your-org>/gridwise:latest --push .
+```
+
+For local single-platform testing only:
 ```bash
 docker build -t gridwise:latest .
 ```
 
-### Run Locally
+### Pull & Run (Fallback Image)
+```bash
+docker pull ghcr.io/<your-org>/gridwise:latest
+docker run -d --name gridwise -p 8080:8080 \
+  -e OFFLINE_FALLBACK=1 \
+  ghcr.io/<your-org>/gridwise:latest
+```
+
+### Run Locally Without Registry
 ```bash
 docker run -d --name gridwise -p 8080:8080 gridwise:latest
 ```

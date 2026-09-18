@@ -16,7 +16,6 @@ from lib.contracts import (
 from lib.prompt import SYSTEM_PROMPT, build_user_prompt
 from lib.guardrails import (
     sanitize_and_guardrail_interpretations,
-    heuristic_extract_note
 )
 from lib.cache import (
     get_cached_interpretation,
@@ -24,8 +23,16 @@ from lib.cache import (
 )
 
 def _call_gemini_api(system: str, user: str, api_key: str) -> Optional[dict]:
-    """Call Google Gemini 2.5 Flash / 1.5 Flash via REST."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    """Call Google Gemini via REST, with automatic model fallback if one encounters quota limit."""
+    models_to_try = [
+        os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite"),
+        "gemini-2.5-flash",
+        "gemini-3.1-flash-lite-preview"
+    ]
+    # Deduplicate while preserving order
+    seen = set()
+    models = [m for m in models_to_try if not (m in seen or seen.add(m))]
+
     payload = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"parts": [{"text": user}]}],
@@ -34,15 +41,17 @@ def _call_gemini_api(system: str, user: str, api_key: str) -> Optional[dict]:
             "temperature": 0.0
         }
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=12)
-        if resp.status_code == 200:
-            data = resp.json()
-            cand = data.get("candidates", [])[0]
-            text = cand.get("content", {}).get("parts", [])[0].get("text", "")
-            return json.loads(text)
-    except Exception:
-        pass
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        try:
+            resp = requests.post(url, json=payload, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                cand = data.get("candidates", [])[0]
+                text = cand.get("content", {}).get("parts", [])[0].get("text", "")
+                return json.loads(text)
+        except Exception:
+            continue
     return None
 
 def _call_groq_api(system: str, user: str, api_key: str) -> Optional[dict]:
@@ -123,16 +132,20 @@ def interpret_operator_notes(
     gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     groq_key = os.environ.get("GROQ_API_KEY")
     openai_key = os.environ.get("OPENAI_API_KEY")
-    
+
     raw_output = None
     user_prompt = build_user_prompt(operator_notes, battery)
 
-    # Try providers in priority order
-    if gemini_key:
+    # OFFLINE_FALLBACK env var (documented in README) forces keyless execution.
+    # This is the degraded path; the LLM is the primary interpreter.
+    offline_fallback = os.environ.get("OFFLINE_FALLBACK") == "1"
+
+    # Try providers in priority order. Skip if OFFLINE_FALLBACK=1.
+    if not offline_fallback and gemini_key:
         raw_output = _call_gemini_api(SYSTEM_PROMPT, user_prompt, gemini_key)
-    if raw_output is None and groq_key:
+    if not offline_fallback and raw_output is None and groq_key:
         raw_output = _call_groq_api(SYSTEM_PROMPT, user_prompt, groq_key)
-    if raw_output is None and openai_key:
+    if not offline_fallback and raw_output is None and openai_key:
         raw_output = _call_openai_api(SYSTEM_PROMPT, user_prompt, openai_key)
 
     # Extract raw list

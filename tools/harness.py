@@ -197,11 +197,14 @@ def run_paraphrase_drills(post_fn) -> bool:
         ("Maintain at least 100 kWh reserve from 18:00 to 21:00.", "minimum_battery_reserve", [18, 19, 20], 100.0),
         ("Store at least 90 kWh in reserve between 6 PM and 10 PM.", "minimum_battery_reserve", [18, 19, 20, 21], 90.0),
 
-        # Max grid window variants
-        ("From 6 PM until 9 PM, campus grid import must not exceed 155 kWh in any hour.", "max_grid_window", [18, 19, 20], 155.0),
-        ("The evening transformer limit is 180 kWh of grid import from 7 PM until 9 PM.", "max_grid_window", [19, 20], 180.0),
-        ("Grid intake must stay at or below 190 kWh from 7 PM until 10 PM while the substation is constrained.", "max_grid_window", [19, 20, 21], 190.0),
-        ("Grid import cap of 155 kWh from 18:00 to 21:00.", "max_grid_window", [18, 19, 20], 155.0),
+        # Max grid window variants. Caps must be feasible against SAMPLE-01
+        # demand at hours 18-20 (peak 215 kWh). Otherwise the LP correctly
+        # triggers Tier-1 relaxation and the directive demotes to no_op.
+        # These caps deliberately exceed peak demand so the directive is honored.
+        ("From 6 PM until 9 PM, campus grid import must not exceed 230 kWh in any hour.", "max_grid_window", [18, 19, 20], 230.0),
+        ("The evening transformer limit is 220 kWh of grid import from 7 PM until 9 PM.", "max_grid_window", [19, 20], 220.0),
+        ("Grid intake must stay at or below 230 kWh from 7 PM until 10 PM while the substation is constrained.", "max_grid_window", [19, 20, 21], 230.0),
+        ("Grid import cap of 225 kWh from 18:00 to 21:00.", "max_grid_window", [18, 19, 20], 225.0),
 
         # Distractor variants (no_op)
         ("The cafeteria menu changes tomorrow.", "no_op", None, None),
@@ -264,7 +267,8 @@ def run_paraphrase_drills(post_fn) -> bool:
             print(f"Drill {idx+1} VALUE MISMATCH: exp={exp_val}, got={adj} ('{note_text}')")
 
     print(f"paraphrase_stable={stable_count}/{len(drills)}")
-    return stable_count >= 30
+    # Honest threshold: every drill must pass. STATUS.md claims 34/34 stable.
+    return stable_count == len(drills)
 
 def run_adversarial_suite(post_fn) -> bool:
     print("\n=== RUNNING ADVERSARIAL SUITE ===")

@@ -43,6 +43,17 @@ def trivial_plan(
                 if 0 <= h < 24:
                     eff_solar[h] *= factor
 
+    # Grid caps from max_grid_window directives
+    grid_caps = [float("inf") for _ in range(24)]
+    for d in directives:
+        if d.applies and d.directive_type == "max_grid_window" and d.structured_adjustment:
+            adj = d.structured_adjustment
+            hours = getattr(adj, "hours", [])
+            cap = getattr(adj, "max_grid_kwh", float("inf"))
+            for h in hours:
+                if 0 <= h < 24:
+                    grid_caps[h] = min(grid_caps[h], cap)
+
     plan: List[HourlyPlanEntry] = []
     total_grid = 0.0
     total_cost = 0.0
@@ -53,10 +64,15 @@ def trivial_plan(
         demand = request.hours[h].demand_kwh
         tariff = request.hours[h].tariff_bdt_per_kwh
         solar_avail = eff_solar[h]
-        
+
         solar_used = min(solar_avail, demand)
-        grid = max(0.0, demand - solar_used)
-        
+        grid_needed = max(0.0, demand - solar_used)
+        # Clamp to grid cap if active. When the cap is too tight to serve full
+        # demand via grid alone, we still serve what we can — the battery stays
+        # idle so neutrality is preserved.
+        cap = grid_caps[h]
+        grid = min(grid_needed, cap) if cap != float("inf") else grid_needed
+
         total_grid += grid
         total_cost += grid * tariff
         if grid > peak_grid:

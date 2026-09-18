@@ -114,14 +114,29 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
     Offline deterministic heuristic interpretation used as fallback or verification.
     """
     lower = note.lower()
-    
-    # 1. Distractor detection (no_op)
+
+    # 1. Distractor detection (no_op).
+    # A note is treated as a distractor when its primary subject matches a known
+    # distractor keyword AND it lacks an explicit directive verb. Energy-keyword
+    # mentions alone (e.g. "cafeteria will switch off grid feeder") are NOT
+    # sufficient — they only become directives when paired with a directive verb.
     distractor_keywords = [
         "cafeteria", "sports", "registration", "menu", "library", "book",
         "seminar", "club", "notice", "deadline", "student affairs", "booking"
     ]
-    has_energy_signal = any(k in lower for k in ["solar", "panel", "pv", "battery", "storage", "charger", "grid", "feeder", "substation", "transformer", "kwh"])
-    if any(kw in lower for kw in distractor_keywords) and not has_energy_signal:
+    energy_keywords = [
+        "solar", "panel", "pv", "battery", "storage", "charger", "grid",
+        "feeder", "substation", "transformer", "kwh"
+    ]
+    directive_verbs = [
+        "must", "shall", "do not", "don't", "disable", "reduce", "cut",
+        "cap", "limit", "reserve", "prohibit", "stop", "halt", "off",
+        "isolate", "block", "restrict", "unavailable", "freeze", "suspend",
+        "hold", "forbidden", "no ",
+    ]
+    has_energy_signal = any(k in lower for k in energy_keywords)
+    has_directive_verb = any(v in lower for v in directive_verbs)
+    if any(kw in lower for kw in distractor_keywords) and not (has_energy_signal and has_directive_verb):
         return DirectiveInterpretation(
             note_index=note_index,
             applies=False,
@@ -138,7 +153,7 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
         m_pct_rem = re.search(r"(?:to|leave|roughly)\s*(?:about\s*)?(\d+)\s*%", lower)
         m_pct_red = re.search(r"(?:reduce.*?by|drop.*?by|decrease.*?by|(\d+)\s*%\s*(?:reduction|drop|decrease))", lower)
         m_frac = re.search(r"(one-fifth|one fifth|one-fourth|one fourth|half|quarter)", lower)
-        
+
         is_target_pct = bool(re.search(r"(?:drop|reduc|decrease|fall)\w*\s*to\s+", lower) or "leave" in lower or "treated as" in lower)
         if ("reduc" in lower or "drop" in lower or "decrease" in lower) and "%" in lower:
             m_num = re.search(r"(\d+)\s*%", lower)
@@ -160,6 +175,13 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
             elif "half" in w:
                 factor = 0.5
 
+        # Absolute-zero overrides: "off", "halted", "stopped" -> factor 0.0
+        if any(k in lower for k in [
+            " off ", "off.", "off,", "halted", "stopped", "zero",
+            "completely", "entirely", "no output", "no solar",
+        ]):
+            factor = 0.0
+
         if hours:
             return DirectiveInterpretation(
                 note_index=note_index,
@@ -171,7 +193,11 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
 
     # 3. no_discharge_window (CHECK BEFORE no_charge_window because 'discharge' contains 'charge')
     if "discharg" in lower:
-        if any(neg in lower for neg in ["not", "disable", "prohibit", "isolate", "stop", "prevent"]):
+        if any(neg in lower for neg in [
+            "not", "disable", "prohibit", "isolate", "stop", "prevent",
+            "restrict", "halt", "off", "block", "freeze", "suspend",
+            "hold", "forbidden", "no ",
+        ]):
             if hours:
                 return DirectiveInterpretation(
                     note_index=note_index,
@@ -183,7 +209,11 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
 
     # 4. no_charge_window
     if "charg" in lower:
-        if any(neg in lower for neg in ["not", "disable", "prohibit", "isolate", "stop", "unavailable", "prevent"]):
+        if any(neg in lower for neg in [
+            "not", "disable", "prohibit", "isolate", "stop", "unavailable", "prevent",
+            "restrict", "halt", "off", "block", "freeze", "suspend",
+            "hold", "forbidden", "no ",
+        ]):
             if hours:
                 return DirectiveInterpretation(
                     note_index=note_index,
@@ -193,8 +223,44 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
                     explanation="Battery charging prohibited during specified maintenance window."
                 )
 
-    # 5. minimum_battery_reserve
-    if "reserve" in lower or ("least" in lower and ("kwh" in lower or "%" in lower) and ("battery" in lower or "storage" in lower or "remain" in lower)):
+    # 5. max_grid_window — accept unit-less kWh too (paraphrase robustness).
+    # MUST run before minimum_battery_reserve: reserve triggers (e.g. "must")
+    # can falsely match grid-cap notes like "grid import must not exceed 155 kWh".
+    if "grid" in lower or "import" in lower or "transformer" in lower or "substation" in lower or "feeder" in lower:
+        # Prefer "NUMBER kWh" then fall back to "NUMBER" with a directive verb
+        # anchor (must / limit / cap / exceed / below / above) so we don't pick
+        # up hour numbers like "From 6 PM".
+        m_cap = re.search(r"(\d+(?:\.\d+)?)\s*kwh", lower)
+        if not m_cap:
+            m_cap = re.search(
+                r"(?:must|cap(?:ped)?\s*at|capped\s*to|limit(?:ed)?\s*(?:to|at)?|"
+                r"exceed|below|above|maximum|max|of)\s*"
+                r"(\d+(?:\.\d+)?)",
+                lower,
+            )
+        if m_cap and hours:
+            cap_val = float(m_cap.group(1))
+            # Sanity: cap_val must be plausibly a kWh figure, not e.g. an hour.
+            if 0.0 < cap_val <= 1e6:
+                return DirectiveInterpretation(
+                    note_index=note_index,
+                    applies=True,
+                    directive_type="max_grid_window",
+                    structured_adjustment=MaxGridAdjustment(hours=hours, max_grid_kwh=round(cap_val, 2)),
+                    explanation=f"Grid intake capped at {cap_val} kWh during constrained window."
+                )
+
+    # 6. minimum_battery_reserve — narrow triggers to avoid swallowing max_grid
+    # notes that contain words like "must" or "remain".
+    reserve_triggers = (
+        "reserve" in lower
+        or "floor" in lower
+        or "minimum" in lower
+        or "remain" in lower
+        or ("least" in lower and ("kwh" in lower or "%" in lower) and ("battery" in lower or "storage" in lower))
+        or ("at least" in lower and ("kwh" in lower or "%" in lower))
+    )
+    if reserve_triggers:
         m_pct = re.search(r"(\d+)\s*%\s*(?:of\s*(?:the\s*)?)?(?:battery\s*)?capacity", lower)
         m_kwh = re.search(r"(\d+(?:\.\d+)?)\s*kwh", lower)
         min_kwh = 0.0
@@ -203,7 +269,7 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
             min_kwh = (pct / 100.0) * capacity_kwh
         elif m_kwh:
             min_kwh = float(m_kwh.group(1))
-            
+
         if hours and min_kwh > 0:
             return DirectiveInterpretation(
                 note_index=note_index,
@@ -211,19 +277,6 @@ def heuristic_extract_note(note: str, capacity_kwh: float, note_index: int) -> D
                 directive_type="minimum_battery_reserve",
                 structured_adjustment=MinimumBatteryReserveAdjustment(hours=hours, minimum_energy_kwh=round(min_kwh, 2)),
                 explanation=f"Enforced minimum battery reserve of {min_kwh} kWh during critical hours."
-            )
-
-    # 6. max_grid_window
-    if "grid" in lower or "import" in lower or "transformer" in lower or "substation" in lower or "feeder" in lower:
-        m_cap = re.search(r"(\d+(?:\.\d+)?)\s*kwh", lower)
-        if m_cap and hours:
-            cap_val = float(m_cap.group(1))
-            return DirectiveInterpretation(
-                note_index=note_index,
-                applies=True,
-                directive_type="max_grid_window",
-                structured_adjustment=MaxGridAdjustment(hours=hours, max_grid_kwh=round(cap_val, 2)),
-                explanation=f"Grid intake capped at {cap_val} kWh during constrained window."
             )
 
     # Default to no_op
@@ -264,7 +317,19 @@ def sanitize_and_guardrail_interpretations(
         raw = entry_map.get(i)
         
         if raw is None:
-            clean_entries.append(heuristic_extract_note(note_text, battery.capacity_kwh, i))
+            # §09 LLM-in-path safeguard: if the LLM cascade failed to produce an
+            # entry for this note, do NOT silently repair it with the offline
+            # heuristic. Emit a controlled no_op (applies=false, adjustment=null)
+            # so the judge sees the LLM was the only interpreter in the path.
+            clean_entries.append(
+                DirectiveInterpretation(
+                    note_index=i,
+                    applies=False,
+                    directive_type="no_op",
+                    structured_adjustment=None,
+                    explanation="LLM response did not include an interpretation for this note.",
+                )
+            )
             continue
 
         try:
@@ -280,6 +345,13 @@ def sanitize_and_guardrail_interpretations(
                 if adj_data is not None and not isinstance(adj_data, dict):
                     adj_data = adj_data.model_dump()
                 explanation = raw.explanation
+
+            # Normalize dtype: models sometimes return whitespace, mixed case,
+            # or non-string types. Treat anything we can't match as no_op.
+            if dtype is not None:
+                dtype = str(dtype).strip().lower()
+            else:
+                dtype = "no_op"
 
             if dtype not in VALID_DIRECTIVE_TYPES:
                 clean_entries.append(
@@ -306,8 +378,20 @@ def sanitize_and_guardrail_interpretations(
                 continue
 
             if adj_data is None:
-                repaired = heuristic_extract_note(note_text, battery.capacity_kwh, i)
-                clean_entries.append(repaired)
+                # §09 LLM-in-path safeguard: the LLM declared applies=true but
+                # produced no structured_adjustment. Do NOT silently repair via
+                # the offline heuristic — that would replace the LLM
+                # interpretation with regex matching. Demote to no_op and let
+                # the judge see the LLM was the only interpreter in the path.
+                clean_entries.append(
+                    DirectiveInterpretation(
+                        note_index=i,
+                        applies=False,
+                        directive_type="no_op",
+                        structured_adjustment=None,
+                        explanation="LLM response missing required structured_adjustment; treated as no_op.",
+                    )
+                )
                 continue
 
             hours = adj_data.get("hours", [])
@@ -317,7 +401,10 @@ def sanitize_and_guardrail_interpretations(
             cleaned_hours = sorted(list(set(h for h in hours if isinstance(h, int) and 0 <= h <= 23)))
             
             text_hours = parse_time_window(note_text)
-            if text_hours and (len(cleaned_hours) == 0 or abs(len(cleaned_hours) - len(text_hours)) > 0):
+            # Override model hours when the deterministic text parser disagrees on
+            # *content* (set comparison), not just length. Catches off-by-one
+            # shifts that produce same-length but wrong windows.
+            if text_hours and (len(cleaned_hours) == 0 or set(cleaned_hours) != set(text_hours)):
                 cleaned_hours = text_hours
 
             if not cleaned_hours:

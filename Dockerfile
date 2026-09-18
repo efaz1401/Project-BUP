@@ -1,5 +1,9 @@
 FROM python:3.12-slim
 
+# Recommended multi-arch build (avoid Apple-Silicon "silently fails"):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t <registry>/gridwise:<tag> --push .
+
 WORKDIR /app
 
 # Install system dependencies
